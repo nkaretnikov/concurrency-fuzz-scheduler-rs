@@ -129,8 +129,8 @@ producer appends a timestamped item every 20ms; the consumer removes one every 1
 crashes if it pulls an item older than one second. Run normally it does not crash:
 
 ```sh
-samples/build_queue.sh
-samples/run_queue.sh
+$ timeout 30 samples/run_queue.sh; echo "exit: $?"
+exit: 124  # terminated due to timeout
 ```
 
 Run under the fuzzing scheduler, the consumer thread gets starved long enough for a buried
