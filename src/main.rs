@@ -2,7 +2,7 @@
 //
 // The original is a sched_ext scheduler written in Java with hello-ebpf, where
 // the random run/sleep policy executes inside a BPF program in the kernel. This
-// port keeps the same behaviour but is a user-space sched_ext scheduler built
+// port keeps the same behavior but is a user-space sched_ext scheduler built
 // on scx_rustland_core: the scheduling policy runs in Rust user space (see
 // fuzz.rs) and the generic BPF backend that ferries tasks back and forth lives
 // inside the scx_rustland_core dependency. As a result every line in this
