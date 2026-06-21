@@ -138,6 +138,42 @@ item to go stale, and the program crashes:
 
 ```sh
 ./scheduler.sh samples/run_queue.sh --log
+WARNING: this is an experimental user-space scheduler proof of concept. It schedules the whole system while attached; do not run it on a machine you care about.
+sleep range: 10.000ms - 2.000s, run range: 1.000ms - 100.000ms, system slice: 5.000ms, slice: 5.000ms
+Iteration
+[ 0.010| 0.009] run_queue.sh is running for 98ms
+[ 0.013| 0.013] run_queue.sh is sleeping for 1862ms
+[ 1.876| 1.876] run_queue.sh is running for 83ms
+[ 1.879| 1.878] queue is sleeping for 1355ms
+[ 1.879| 1.879] queue is running for 94ms
+[ 1.978| 1.978] queue is sleeping for 528ms
+[ 2.508| 2.507] queue is running for 81ms
+[ 2.596| 2.596] queue is sleeping for 1071ms
+[ 3.235| 3.234] queue is running for 98ms
+[ 3.339| 3.338] queue is sleeping for 653ms
+[ 3.669| 3.668] queue is running for 8ms
+[ 3.680| 3.680] queue is sleeping for 1941ms
+[ 3.993| 3.992] queue is running for 58ms
+[ 4.056| 4.055] queue is sleeping for 1106ms
+[ 5.163| 5.162] queue is running for 83ms
+[ 5.267| 5.266] queue is sleeping for 194ms
+[ 5.461| 5.461] queue is running for 70ms
+[ 5.545| 5.544] queue is sleeping for 24ms
+[ 5.569| 5.569] queue is running for 23ms
+[ 5.610| 5.610] queue is sleeping for 962ms
+[ 5.622| 5.621] queue is running for 83ms
+[ 5.709| 5.709] queue is sleeping for 706ms
+[ 6.417| 6.416] queue is running for 54ms
+Item is invalid! age 1213ms
+[ 6.418| 6.418] queue is sleeping for 189ms
+[ 6.573| 6.572] queue is running for 86ms
+[ 6.608| 6.608] queue is running for 44ms
+
+Iteration Count: 1
+Iteration Duration: mean=6.7s+-0.0s,min=6.7s,max=6.7s
+
+Program failed after 6.651
+EXIT: unregistered from user space
 ```
 
 License
