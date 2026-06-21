@@ -105,7 +105,11 @@ impl<'a> FuzzScheduler<'a> {
             0,            // exit_dump_len, 0 keeps the default
             false,        // partial, false schedules all tasks
             false,        // debug off
-            true,         // let the backend use idle CPUs
+            false,        // builtin_idle off: route every wakeup through the
+                          // policy. With it on, the backend direct-dispatches
+                          // waking tasks to idle CPUs and they never reach our
+                          // run/sleep state machine, so the target is never
+                          // starved and the fuzzer can't manufacture stalls.
             false,        // ignore NUMA locality
             cfg.slice_ns, // default slice for backend dispatches
             "fifo_fuzz",  // scx ops name
