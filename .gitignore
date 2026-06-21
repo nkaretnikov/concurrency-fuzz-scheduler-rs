@@ -6,3 +6,8 @@ samples/queue
 /intf.h
 /main.bpf.c
 /src/bpf.rs
+
+# Vim swap files
+*.swp
+*.swo
+*.swn
