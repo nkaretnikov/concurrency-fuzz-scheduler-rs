@@ -87,10 +87,6 @@ struct Cli {
     #[arg(long = "log", default_value_t = false)]
     log: bool,
 
-    /// Focus on Java application threads.
-    #[arg(long = "java", default_value_t = false)]
-    focus_on_java: bool,
-
     /// Maximum time in seconds for a single iteration before treating it as an
     /// error/timeout (default: -1, disabled).
     #[arg(short = 't', long = "timeout", default_value_t = -1)]
@@ -119,7 +115,6 @@ pub struct Config {
     pub max_iterations: i32,
     pub error_check_interval_ns: u64,
     pub log: bool,
-    pub focus_on_java: bool,
     pub timeout_seconds: i64,
 }
 
@@ -184,7 +179,6 @@ fn main() -> Result<()> {
         max_iterations: cli.max_iterations,
         error_check_interval_ns: cli.error_check_interval_ns,
         log: cli.log,
-        focus_on_java: cli.focus_on_java,
         timeout_seconds: cli.timeout_seconds,
     };
 

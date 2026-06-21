@@ -107,7 +107,6 @@ Options:
   -m, --max-iterations <N>       Maximum number of iterations [default: -1]
       --error-check-interval <D> Time between two error-command checks [default: 10s]
       --log                      Log the state changes
-      --java                     Focus on Java application threads
   -t, --timeout <SECONDS>        Per-iteration timeout, -1 disables it [default: -1]
   -h, --help                     Print help
   -V, --version                  Print version

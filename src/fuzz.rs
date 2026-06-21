@@ -173,9 +173,8 @@ impl<'a> FuzzScheduler<'a> {
         while let Ok(Some(task)) = self.bpf.dequeue_task() {
             did_work = true;
             let related = script_pid != 0 && self.is_related(task.pid, script_pid);
-            let comm = task.comm_str();
 
-            if related && !self.is_jvm_runtime(&comm) {
+            if related {
                 if self.update_state(&task, now) {
                     self.dispatch(&task, nr_waiting, true);
                 } else {
@@ -183,10 +182,9 @@ impl<'a> FuzzScheduler<'a> {
                     self.held.insert(task.pid, task);
                 }
             } else {
-                // Unrelated tasks, and the JVM runtime threads when focusing on
-                // Java, are dispatched normally so the rest of the system keeps
-                // moving. Their slice depends only on relatedness.
-                self.dispatch(&task, nr_waiting, related);
+                // Unrelated tasks are dispatched normally with the system slice
+                // so the rest of the machine keeps moving.
+                self.dispatch(&task, nr_waiting, false);
             }
         }
 
@@ -320,20 +318,6 @@ impl<'a> FuzzScheduler<'a> {
         let related = compute_related(pid, script_pid);
         self.related_cache.insert(pid, related);
         related
-    }
-
-    // Leave the JVM runtime threads (compiler, garbage collector, VM and
-    // monitor threads) unfuzzed when focusing on Java application threads.
-    fn is_jvm_runtime(&self, comm: &str) -> bool {
-        if !self.cfg.focus_on_java {
-            return false;
-        }
-        let b = comm.as_bytes();
-        let c0 = b.first().copied().unwrap_or(0);
-        let c1 = b.get(1).copied().unwrap_or(0);
-        ((c0 == b'C' || c0 == b'G') && (c1 == b'1' || c1 == b'2'))
-            || (c0 == b'V' && c1 == b'M')
-            || (c0 == b'M' && c1 == b'o')
     }
 
     fn log_event(&mut self, task: &QueuedTask, event_type: EventType, duration_ns: u64) {
