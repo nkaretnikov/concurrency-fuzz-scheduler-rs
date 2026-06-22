@@ -15,9 +15,9 @@
         default = pkgs.mkShell {
           name = "concurrency-fuzz-scheduler-rs";
 
-          # Tools that run on the build host. clang and llvm are needed to
-          # compile the bundled BPF backend; bpftool generates vmlinux.h and the
-          # skeleton; the rust tools build the user-space scheduler; gcc and
+          # Tools that run on the build host. clang and llvm compile the
+          # in-kernel scheduler (src/bpf/main.bpf.c); bpftool generates
+          # vmlinux.h and the skeleton; the rust tools build the loader; gcc and
           # make build the C sample.
           nativeBuildInputs = with pkgs; [
             cargo

@@ -1,6 +1,6 @@
-// Pulls in the bindgen output for the scx_rustland_core backend's shared
-// structs (queued_task_ctx, dispatched_task_ctx and friends), generated into
-// OUT_DIR by RustLandBuilder.
+// Pulls in the bindgen output for the structs shared with the BPF scheduler
+// (fuzz_event, fuzz_config), generated into OUT_DIR by BpfBuilder from
+// src/bpf/intf.h.
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]

@@ -13,56 +13,68 @@ It is the code for the FOSDEM'25 talk
 [Concurrency Testing using Custom Linux Schedulers](https://fosdem.org/2025/schedule/event/fosdem-2025-4489-concurrency-testing-using-custom-linux-schedulers/).
 For background on sched_ext, see the [LWN article](https://lwn.net/SubscriberLink/1007689/922423e440f5e68a/).
 
-This repository is 100% Rust
-----------------------------
+In-kernel BPF design
+--------------------
 
 The original is written in Java with [hello-ebpf](https://github.com/parttimenerd/hello-ebpf),
 which compiles the scheduler from Java down to a sched_ext BPF program. There the run/sleep
 policy runs *inside the kernel* as BPF.
 
-This port is **entirely Rust**, with **no C in the repository**. It achieves that by being a
-user-space scheduler built on [scx_rustland_core](https://crates.io/crates/scx_rustland_core):
+This port follows the same in-kernel design: the run/sleep policy is a sched_ext BPF program
+written in C in [`src/bpf/main.bpf.c`](src/bpf/main.bpf.c), and the Rust in this repository is
+only a thin loader plus the campaign supervisor. **The scheduling decision never leaves the
+kernel.**
 
-- The scheduling policy (the random run/sleep state machine, per-task slices, the
-  "is this task part of the target" decision, the logging) is plain Rust in
-  [`src/fuzz.rs`](src/fuzz.rs).
-- `scx_rustland_core` provides a generic sched_ext BPF backend that forwards every runnable
-  task up to user space and dispatches the tasks we hand back. That backend is C, but it
-  lives inside the dependency crate; we never write or maintain any C.
+That choice is deliberate and is the point of this branch. The motivation is reproducibility
+under a deterministic hypervisor (Bedrock): if the decision ran in a user-space process, its
+own nondeterminism (thread interleavings, hash-map iteration order, wall-clock timing) would
+leak into the schedule and a run could not be replayed from a seed. With the policy in the
+kernel, the only inputs are a seeded PRNG and the (deterministic, under Bedrock) guest clock
+and task-wakeup order, so the same seed reproduces the same schedule.
+
+An earlier variant of this project put the policy in Rust user space on top of
+[scx_rustland_core](https://crates.io/crates/scx_rustland_core), which kept the repository
+free of C but routed every scheduling decision through a user/kernel round trip. That variant
+lives on the `main` branch; this branch trades "no C" for "no user space in the decision path".
+
+> Why not write the in-kernel scheduler in Rust too? As of mid-2026 the Rust eBPF toolchain
+> (aya) does not yet support sched_ext `struct_ops`, and rustc cannot yet emit the BTF/CO-RE
+> relocations needed to read `task_struct` fields portably. So the in-kernel part is C, which
+> is also what every scheduler in [sched-ext/scx](https://github.com/sched-ext/scx) does.
 
 ### What changed from the original, and why it still behaves the same
 
 This is a re-architecture, not a line-for-line translation. The original keeps a "sleeping"
-task off the CPU by leaving it parked in the kernel dispatch queue and skipping it. Here the
-equivalent is: when a task should sleep, user space simply receives it from the backend and
-declines to dispatch it, holding it until its random sleep timer expires, then dispatches it
-again. The observable effect (threads getting stopped and started at random) is identical.
+task off the CPU by leaving it parked in the kernel dispatch queue and skipping it. Here every
+queued task lives in one shared dispatch queue ordered by the time at which it next becomes
+eligible to run; a sleeping task is inserted with a future eligibility time, so it stays
+queued but `dispatch()` refuses to run it until its time arrives. A periodic timer kicks the
+CPUs so eligibility is re-checked even when the system would otherwise idle. The observable
+effect (threads getting stopped and started at random) is the same.
 
-Trade-offs of the user-space design:
+Trade-offs of the in-kernel design:
 
-- **Pro: the whole project is Rust** and the policy is easy to read and modify.
-- **Pro: logging is direct.** Because the policy runs in user space, the run/sleep log lines
-  are printed directly instead of being routed through the kernel trace pipe.
-- **Con: a scheduling decision is a user/kernel round trip**, so this is slower than an
-  in-kernel scheduler. For a fuzzer that deliberately injects millisecond-scale delays this
-  overhead is irrelevant, but it is the reason real schedulers keep hot paths in BPF.
-- **Con: it tracks the sched_ext ABI.** The `scx_rustland_core`, `scx_utils` and `libbpf-rs`
-  versions are pinned and must match your kernel; a kernel upgrade may require a bump.
-
-If you instead want the in-kernel design of the original (a `*.bpf.c` plus a thin Rust
-loader), that is a different, equally valid shape; this repository chose the all-Rust route.
+- **Pro: no user space in the decision path**, which is what makes seed-based replay possible
+  under a deterministic hypervisor.
+- **Pro: the decision is cheap.** No user/kernel round trip per scheduling event.
+- **Con: the repository now contains C** ([`src/bpf/main.bpf.c`](src/bpf/main.bpf.c) and
+  [`src/bpf/intf.h`](src/bpf/intf.h)) that you maintain against the sched_ext kfunc ABI.
+- **Con: it tracks the sched_ext ABI.** The `scx_utils` and `libbpf-rs` versions are pinned
+  and must match your kernel; a kernel upgrade may require a bump.
 
 How it works
 ------------
 
 Two threads cooperate:
 
-- The **scheduler thread** ([`src/fuzz.rs`](src/fuzz.rs)) runs the policy. For every task
-  that belongs to the fuzzed process it drives a small state machine: run for a random time
-  from `--run`, then sleep for a random time from `--sleep`, and so on. Tasks unrelated to
-  the target are dispatched immediately with a fixed system slice. Relatedness is determined
-  by reading `/proc` for the task's thread group and parent, mirroring the original's
-  task_struct walk.
+- The **scheduler** is the BPF program in [`src/bpf/main.bpf.c`](src/bpf/main.bpf.c). For every
+  task that belongs to the fuzzed process it drives a small state machine: run for a random
+  time from `--run`, then sleep for a random time from `--sleep`, and so on. Tasks unrelated to
+  the target run normally with a fixed system slice. Relatedness is determined in-kernel by
+  reading the task's thread group and parent from `task_struct`, replacing the original
+  task_struct walk. The Rust **loader** ([`src/fuzz.rs`](src/fuzz.rs)) attaches it, pushes the
+  config and `--seed` in, tells it which pid to fuzz, and drains a ring buffer of run/sleep
+  events to print the log.
 - The **supervisor thread** ([`src/supervisor.rs`](src/supervisor.rs)) launches the target,
   tells the scheduler which pid to fuzz, and restarts the target each iteration until it
   crashes (non-zero exit), a custom error command succeeds, or a timeout fires.
@@ -70,8 +82,9 @@ Two threads cooperate:
 Requirements
 ------------
 
-- A Linux kernel with sched_ext, version 6.12 or later (the original recommends 6.13+).
-- The BPF build toolchain used to compile the bundled backend: `clang`, `llvm-strip`,
+- A Linux kernel with sched_ext, version 6.12 or later (the original recommends 6.13+), built
+  with `CONFIG_SCHED_CLASS_EXT=y` and `CONFIG_DEBUG_INFO_BTF=y`.
+- The BPF build toolchain used to compile the in-kernel scheduler: `clang`, `llvm-strip`,
   `bpftool`, `libbpf` development headers, and `pkg-config`.
 - A Rust toolchain (stable).
 - Root privileges to run (attaching a sched_ext scheduler requires them).
@@ -83,9 +96,10 @@ Build
 cargo build --release
 ```
 
-At build time `scx_rustland_core`'s `RustLandBuilder` unpacks its BPF backend, compiles it,
-generates `vmlinux.h`, and produces the libbpf-rs skeleton. The only files you maintain are
-Rust.
+At build time [`build.rs`](build.rs) runs `scx_utils`'s `BpfBuilder`, which generates
+`vmlinux.h`, compiles [`src/bpf/main.bpf.c`](src/bpf/main.bpf.c) with `clang`, and produces the
+libbpf-rs skeleton plus the bindings for the structs shared in
+[`src/bpf/intf.h`](src/bpf/intf.h).
 
 Usage
 -----
@@ -107,6 +121,7 @@ Options:
   -m, --max-iterations <N>       Maximum number of iterations [default: -1]
       --error-check-interval <D> Time between two error-command checks [default: 10s]
       --log                      Log the state changes
+      --seed <SEED>              Seed for the in-kernel PRNG; same seed reproduces the schedule
   -t, --timeout <SECONDS>        Per-iteration timeout, -1 disables it [default: -1]
   -h, --help                     Print help
   -V, --version                  Print version
@@ -137,42 +152,86 @@ Run under the fuzzing scheduler, the consumer thread gets starved long enough fo
 item to go stale, and the program crashes:
 
 ```sh
-./scheduler.sh samples/run_queue.sh --log
-WARNING: this is an experimental user-space scheduler proof of concept. It schedules the whole system while attached; do not run it on a machine you care about.
-sleep range: 10.000ms - 2.000s, run range: 1.000ms - 100.000ms, system slice: 5.000ms, slice: 5.000ms
+$ ./scheduler.sh samples/run_queue.sh --log --seed 0x1337
+WARNING: this is an experimental sched_ext scheduler proof of concept. It schedules the whole system while attached; do not run it on a machine you care about.
+sleep range: 10.000ms - 2.000s, run range: 1.000ms - 100.000ms, system slice: 5.000ms, slice: 5.000ms, seed: 0x1337
+libbpf: struct_ops fifo_fuzz_ops: member sub_attach not found in kernel, skipping it as it's set to zero
+libbpf: struct_ops fifo_fuzz_ops: member sub_detach not found in kernel, skipping it as it's set to zero
+libbpf: struct_ops fifo_fuzz_ops: member sub_cgroup_id not found in kernel, skipping it as it's set to zero
+libbpf: map 'fifo_fuzz_ops': BPF map skeleton link is uninitialized
 Iteration
-[ 0.010| 0.009] run_queue.sh is running for 98ms
-[ 0.013| 0.013] run_queue.sh is sleeping for 1862ms
-[ 1.876| 1.876] run_queue.sh is running for 83ms
-[ 1.879| 1.878] queue is sleeping for 1355ms
-[ 1.879| 1.879] queue is running for 94ms
-[ 1.978| 1.978] queue is sleeping for 528ms
-[ 2.508| 2.507] queue is running for 81ms
-[ 2.596| 2.596] queue is sleeping for 1071ms
-[ 3.235| 3.234] queue is running for 98ms
-[ 3.339| 3.338] queue is sleeping for 653ms
-[ 3.669| 3.668] queue is running for 8ms
-[ 3.680| 3.680] queue is sleeping for 1941ms
-[ 3.993| 3.992] queue is running for 58ms
-[ 4.056| 4.055] queue is sleeping for 1106ms
-[ 5.163| 5.162] queue is running for 83ms
-[ 5.267| 5.266] queue is sleeping for 194ms
-[ 5.461| 5.461] queue is running for 70ms
-[ 5.545| 5.544] queue is sleeping for 24ms
-[ 5.569| 5.569] queue is running for 23ms
-[ 5.610| 5.610] queue is sleeping for 962ms
-[ 5.622| 5.621] queue is running for 83ms
-[ 5.709| 5.709] queue is sleeping for 706ms
-[ 6.417| 6.416] queue is running for 54ms
-Item is invalid! age 1213ms
-[ 6.418| 6.418] queue is sleeping for 189ms
-[ 6.573| 6.572] queue is running for 86ms
-[ 6.608| 6.608] queue is running for 44ms
+[ 0.110| 0.010] queue is running for 57ms
+[ 0.120| 0.020] queue is running for 85ms
+[ 0.171| 0.071] queue is sleeping for 780ms
+[ 0.220| 0.120] queue is sleeping for 105ms
+[ 0.346| 0.246] queue is running for 53ms
+[ 0.406| 0.306] queue is sleeping for 113ms
+[ 0.533| 0.433] queue is running for 82ms
+[ 0.634| 0.534] queue is sleeping for 529ms
+[ 0.953| 0.853] queue is running for 2ms
+[ 0.963| 0.863] queue is sleeping for 1218ms
+[ 1.183| 1.083] queue is running for 47ms
+[ 1.243| 1.143] queue is sleeping for 155ms
+[ 1.420| 1.320] queue is running for 97ms
+[ 1.520| 1.420] queue is sleeping for 1999ms
+[ 2.192| 2.092] queue is running for 43ms
+Item is invalid! age 1070ms
+[ 2.233| 2.132] queue is running for 81ms
 
 Iteration Count: 1
-Iteration Duration: mean=6.7s+-0.0s,min=6.7s,max=6.7s
+Iteration Duration: mean=2.3s+-0.0s,min=2.3s,max=2.3s
 
-Program failed after 6.651
+Program failed after 2.303
+EXIT: unregistered from user space
+```
+
+Note that the second time the scheduler is run with the same seed, the sleep
+durations are reproduced, but the overall run is not: the target's threads share
+one in-kernel PRNG, and on a multi-core host the order in which they consume it
+(and their real-time progress) is not deterministic, so the runs diverge. Under
+Bedrock a single vCPU and a deterministic clock fix that order, so the same seed
+should reproduce the whole run.
+
+```sh
+$ ./scheduler.sh samples/run_queue.sh --log --seed 0x1337
+WARNING: this is an experimental sched_ext scheduler proof of concept. It schedules the whole system while attached; do not run it on a machine you care about.
+sleep range: 10.000ms - 2.000s, run range: 1.000ms - 100.000ms, system slice: 5.000ms, slice: 5.000ms, seed: 0x1337
+libbpf: struct_ops fifo_fuzz_ops: member sub_attach not found in kernel, skipping it as it's set to zero
+libbpf: struct_ops fifo_fuzz_ops: member sub_detach not found in kernel, skipping it as it's set to zero
+libbpf: struct_ops fifo_fuzz_ops: member sub_cgroup_id not found in kernel, skipping it as it's set to zero
+libbpf: map 'fifo_fuzz_ops': BPF map skeleton link is uninitialized
+Iteration
+[ 0.101| 0.001] queue is running for 57ms
+[ 0.102| 0.001] queue is running for 85ms
+[ 0.162| 0.061] queue is sleeping for 780ms
+[ 0.192| 0.092] queue is sleeping for 105ms
+[ 0.308| 0.208] queue is running for 53ms
+[ 0.368| 0.268] queue is sleeping for 113ms
+[ 0.493| 0.392] queue is running for 82ms
+[ 0.583| 0.483] queue is sleeping for 529ms
+[ 0.959| 0.859] queue is running for 2ms
+[ 0.979| 0.879] queue is sleeping for 1218ms
+[ 1.123| 1.022] queue is running for 47ms
+[ 1.173| 1.073] queue is sleeping for 155ms
+[ 1.332| 1.232] queue is running for 97ms
+[ 1.433| 1.333] queue is sleeping for 1999ms
+[ 2.216| 2.116] queue is running for 43ms
+[ 2.277| 2.176] queue is sleeping for 527ms
+[ 2.822| 2.722] queue is running for 81ms
+[ 2.923| 2.822] queue is sleeping for 1987ms
+[ 3.443| 3.343] queue is running for 78ms
+[ 3.524| 3.423] queue is sleeping for 1556ms
+[ 4.930| 4.830] queue is running for 86ms
+[ 5.030| 4.930] queue is sleeping for 1578ms
+[ 5.091| 4.991] queue is running for 60ms
+[ 5.152| 5.052] queue is sleeping for 1229ms
+Item is invalid! age 1244ms
+[ 5.352| 5.252] queue is sleeping for 401ms
+
+Iteration Count: 1
+Iteration Duration: mean=5.4s+-0.0s,min=5.4s,max=5.4s
+
+Program failed after 5.406
 EXIT: unregistered from user space
 ```
 

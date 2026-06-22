@@ -1,23 +1,19 @@
 // Rust port of https://github.com/parttimenerd/concurrency-fuzz-scheduler.
 //
-// The original is a sched_ext scheduler written in Java with hello-ebpf, where
-// the random run/sleep policy executes inside a BPF program in the kernel. This
-// port keeps the same behavior but is a user-space sched_ext scheduler built
-// on scx_rustland_core: the scheduling policy runs in Rust user space (see
-// fuzz.rs) and the generic BPF backend that ferries tasks back and forth lives
-// inside the scx_rustland_core dependency. As a result every line in this
-// repository is Rust. See the README for the trade-offs of this re-architecture.
+// Like the original (Java + hello-ebpf), the random run/sleep policy executes
+// inside a sched_ext BPF program in the kernel (see src/bpf/main.bpf.c); this
+// keeps the scheduling decision out of user space, so that under a
+// deterministic hypervisor (Bedrock) a run is reproducible from a seed. The
+// Rust here is only the loader and campaign supervisor.
 //
-// main() wires two threads together: the scheduler policy on the main thread,
-// and the campaign supervisor (which launches and watches the target) on a
-// second thread. They share only a handful of atomics.
+// main() wires two threads together: the loader (which attaches the scheduler
+// and drains its event log) on the main thread, and the campaign supervisor
+// (which launches and watches the target) on a second thread. They share only
+// a handful of atomics.
 
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
-
-#[rustfmt::skip]
-mod bpf;
 
 mod diagram;
 mod duration;
@@ -87,6 +83,12 @@ struct Cli {
     #[arg(long = "log", default_value_t = false)]
     log: bool,
 
+    /// Seed for the in-kernel PRNG. The same seed reproduces the same schedule
+    /// (under a deterministic guest such as Bedrock with a single vCPU).
+    /// Accepts decimal or 0x-prefixed hex.
+    #[arg(long = "seed", default_value_t = 0x9e37_79b9_7f4a_7c15, value_parser = parse_seed)]
+    seed: u64,
+
     /// Maximum time in seconds for a single iteration before treating it as an
     /// error/timeout (default: -1, disabled).
     #[arg(short = 't', long = "timeout", default_value_t = -1)]
@@ -99,6 +101,16 @@ fn parse_duration_ns(s: &str) -> Result<u64, String> {
 
 fn parse_duration_range(s: &str) -> Result<DurationRange, String> {
     DurationRange::parse(s).map_err(|e| e.to_string())
+}
+
+// Accept a seed as decimal or 0x-prefixed hex.
+fn parse_seed(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let result = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => s.parse::<u64>(),
+    };
+    result.map_err(|_| format!("invalid seed: {s}"))
 }
 
 /// Read only configuration shared with both threads.
@@ -116,6 +128,7 @@ pub struct Config {
     pub error_check_interval_ns: u64,
     pub log: bool,
     pub timeout_seconds: i64,
+    pub seed: u64,
 }
 
 impl Config {
@@ -156,10 +169,10 @@ impl Shared {
 }
 
 fn print_warning() {
-    // scx_rustland_core makes scheduling decisions in user space. As its own
-    // examples note, that is great for experimentation but not for production.
+    // While attached, this sched_ext scheduler schedules every task on the
+    // system, not just the target, and deliberately stalls threads at random.
     eprintln!(
-        "WARNING: this is an experimental user-space scheduler proof of concept. \
+        "WARNING: this is an experimental sched_ext scheduler proof of concept. \
          It schedules the whole system while attached; do not run it on a machine \
          you care about."
     );
@@ -180,16 +193,18 @@ fn main() -> Result<()> {
         error_check_interval_ns: cli.error_check_interval_ns,
         log: cli.log,
         timeout_seconds: cli.timeout_seconds,
+        seed: cli.seed,
     };
 
     print_warning();
     if cfg.log {
         println!(
-            "sleep range: {}, run range: {}, system slice: {}, slice: {}",
+            "sleep range: {}, run range: {}, system slice: {}, slice: {}, seed: {:#x}",
             cfg.sleep_range,
             cfg.run_range,
             nanoseconds_to_string(cfg.system_slice_ns, 3),
             nanoseconds_to_string(cfg.slice_ns, 3),
+            cfg.seed,
         );
     }
 
@@ -203,8 +218,8 @@ fn main() -> Result<()> {
         thread::spawn(move || supervisor::run(cfg, shared))
     };
 
-    // Run the scheduler policy on the main thread. BpfScheduler is not Send, so
-    // it has to stay here.
+    // Load and attach the scheduler on the main thread. The BPF skeleton holds
+    // a raw object pointer and is not Send, so it has to stay here.
     let mut open_object = MaybeUninit::uninit();
     let result = match FuzzScheduler::init(&mut open_object, cfg, shared.clone()) {
         Ok(mut scheduler) => scheduler.run().map(|_| ()),
